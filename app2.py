@@ -3,11 +3,278 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import sqlite3
-from datetime import datetime
+import mysql.connector
+from mysql.connector import Error
+from datetime import date
+import base64
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.tree import DecisionTreeClassifier
+# ============================================
+# SYSTÈME D'AUTHENTIFICATION (Initialement auth.py)
+# ============================================
+
+def init_session_state():
+    """Initialise les variables de session pour l'authentification"""
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    if 'user' not in st.session_state:
+        st.session_state.user = None
+# Remplacer l'ancienne fonction authenticate() par celle-ci
+import mysql.connector
+# Note: 'Error' must also be imported if used in try/except blocks
+
+# --- PARAMÈTRES DE CONNEXION ---
+DB_HOST = "localhost"  
+DB_USER = "root"      
+DB_PASSWORD = "" # REMPLACEZ CECI
+DB_NAME = "diabetecam"  # REMPLACEZ CECI (Le nom de votre base créée)
+
+def create_db_connection():
+    """Crée et retourne une connexion à la base de données MySQL."""
+    conn = None
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            passwd=DB_PASSWORD,
+            database=DB_NAME
+        )
+        if conn.is_connected():
+            print("Connexion MySQL établie avec succès.")
+        return conn
+    except Error as e:
+        st.error(f"❌ Erreur critique de connexion à la base de données MySQL : {e}")
+        st.warning("Vérifiez que WAMP est démarré et que les identifiants (mot de passe, nom de la BD) sont corrects.")
+        return None
+
+def close_db_connection(conn):
+    """Ferme la connexion à la base de données MySQL si elle est ouverte."""
+    if conn and conn.is_connected():
+        conn.close()
+        print("Connexion MySQL fermée.")
+
+def init_database():
+    """Teste simplement si la connexion peut être établie au démarrage."""
+    test_conn = create_db_connection()
+    if test_conn:
+        close_db_connection(test_conn)
+    else:
+        # Si la connexion échoue, nous arrêtons le script ici pour éviter d'autres erreurs.
+        st.stop()
+def get_user_from_db(username, role):
+    """Récupère les informations d'un utilisateur par son nom d'utilisateur et rôle."""
+    conn = create_db_connection()
+    if conn is None:
+        return None
+        
+    cursor = conn.cursor(dictionary=True)
+    
+    # Sécurité : Limiter à l'utilisateur et au rôle pour plus de précision
+    query = "SELECT username, password, role, fullName, permissions FROM utilisateurs WHERE username = %s AND role = %s"
+    try:
+        cursor.execute(query, (username, role))
+        user_data = cursor.fetchone()
+        
+        if user_data:
+            # Convertir la chaîne de permissions en liste Python
+            permission_list = user_data['permissions'].split(',')
+            
+            # Construire l'objet utilisateur comme avant
+            user = {
+                'username': user_data['username'],
+                'password': user_data['password'],
+                'role': user_data['role'],
+                'fullName': user_data['fullName'],
+                'permissions': [p.strip() for p in permission_list] # Nettoyer les espaces
+            }
+            return user
+            
+    except Error as e:
+        st.error(f"Erreur de lecture de la base de données : {e}")
+    finally:
+        close_db_connection(conn)
+        
+    return None  
+def get_page_key(permission_name):
+    """Trouve la clé de page complète (avec emoji) à partir du nom de permission."""
+    for key, value in page_mapping.items():
+        if value == permission_name:
+            return key
+    return permission_name # Retourne le nom simple si non trouvé
+
+# ... continuez avec def authenticate(...), def check_permission(...), etc.    
+def create_user_in_db(username, password, role, fullname, permissions_list):
+    """Insère un nouvel utilisateur dans la BD."""
+    # Assurez-vous que 'Error' est importé (ex: from mysql.connector import Error)
+    # Assurez-vous que 'create_db_connection' et 'close_db_connection' sont définis
+    conn = create_db_connection()
+    if conn is None:
+        return False
+        
+    cursor = conn.cursor()
+    # Convertir la liste de permissions en chaîne pour la BD
+    permissions_str = ",".join(permissions_list) 
+    
+    query = "INSERT INTO utilisateurs (username, password, role, fullName, permissions) VALUES (%s, %s, %s, %s, %s)"
+    # Le mot de passe devrait être hashé (ex: using bcrypt) avant l'insertion pour des raisons de sécurité.
+    # Pour le moment, nous utilisons la version non hashée pour la simplicité.
+    values = (username, password, role, fullname, permissions_str)
+    
+    try:
+        cursor.execute(query, values)
+        conn.commit()
+        return True
+    except Error as e:
+        # Assurez-vous d'afficher le message d'erreur SQL pour le debug
+        st.error(f"Erreur lors de l'ajout de l'utilisateur : {e}")
+        return False
+    finally:
+        # Cette ligne DOIT être la dernière du bloc 'finally'
+        close_db_connection(conn)
+       
+def authenticate(username, password, role):
+    """Vérifie les identifiants en interrogeant la base de données."""
+    
+    # 1. Tenter de récupérer les informations de l'utilisateur depuis la BD
+    user = get_user_from_db(username, role)
+    
+    # 2. Vérifier si l'utilisateur existe et si le mot de passe correspond
+    if user and user['password'] == password:
+        # NOTE IMPORTANTE: Dans une application réelle, le mot de passe 
+        # serait hashé (ex: SHA256) et vérifié avec bcrypt ou un équivalent.
+        return user
+        
+    return None
+def check_permission(page_name):
+    """Vérifie si l'utilisateur a accès à une page"""
+    if not st.session_state.logged_in:
+        return False
+    
+    # page_mapping est accessible car il est défini globalement AVANT cette fonction
+    permission_name = page_mapping.get(page_name, page_name)
+    
+    # Vérifie si l'utilisateur et ses permissions existent avant de vérifier
+    if st.session_state.user and 'permissions' in st.session_state.user:
+        return permission_name in st.session_state.user['permissions']
+    return False
+
+def show_login_page():
+    # --- CSS OPTIMISÉ (Reste le même, car il est bon pour le centrage) ---
+    st.markdown("""
+    <style> 
+        .login-title {
+            text-align: center;
+            color: #006233;
+            font-size: 2.2em; /* Légèrement plus petit */
+            margin-bottom: 5px; /* Moins de marge */
+        }
+        .login-subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 15px; /* Moins de marge */
+        }
+        /* Style pour réduire l'espace autour du selectbox */
+        div[data-testid="stForm"] > div > div:nth-child(1) {
+            padding-top: 0px; 
+            padding-bottom: 10px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # --- STRUCTURE CENTRÉE (Conserver) ---
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        # En-tête simplifié
+        st.markdown('<h1 class="login-title">🏥 DiabèteCam</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="login-subtitle">Connexion Sécurisée</p>', unsafe_allow_html=True)
+        
+        # Sélection du rôle (on met le label à côté pour gagner de la place)
+        # st.markdown("### 👤 Sélectionnez votre profil") # Supprimé pour gagner de l'espace
+        col_role_label, col_role_select = st.columns([1, 2.5])
+        
+        with col_role_label:
+            st.markdown("👤 **Profil** :")
+            
+        with col_role_select:
+            role = st.selectbox(
+                "Rôle",
+                ["medecin", "infirmier", "admin"],
+                format_func=lambda x: {
+                    "medecin": "👨‍⚕️ Médecin",
+                    "infirmier": "👩‍⚕️ Infirmier(ère)",
+                    "admin": "🔐 Administrateur"
+                }[x],
+                label_visibility="collapsed" # Le label est maintenant dans la colonne précédente
+            )
+        
+        st.markdown("---") # Ligne de séparation courte pour la clarté
+        
+        # Formulaire de connexion
+        username = st.text_input("📧 Nom d'utilisateur", placeholder="Entrez votre identifiant")
+        password = st.text_input("🔒 Mot de passe", type="password", placeholder="Entrez votre mot de passe")
+        
+        # ... (le reste du code du formulaire est conservé) ... 
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("🚀 Se Connecter", use_container_width=True, type="primary"):
+                if username and password:
+                    user = authenticate(username, password, role)
+                    if user:
+                        st.session_state.logged_in = True
+                        st.session_state.user = user
+                        st.success(f"✅ Bienvenue {user['fullName']} !")
+                        st.rerun()
+                    else:
+                        st.error("❌ Identifiants incorrects")
+                else:
+                    st.warning("⚠️ Veuillez remplir tous les champs")
+        
+
+        
+def logout():
+    """Déconnecte l'utilisateur"""
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.rerun()
+
 
 # ============================================
-# CONFIGURATION DE LA PAGE
+# MAPPING DES PAGES / PERMISSIONS
+# CE BLOC DOIT ÊTRE AJOUTÉ
+# ============================================
+page_mapping = {
+    "🏠 Accueil": "Accueil",
+    "📊 Visualisations": "Visualisations",
+    "🤖 ML Model 1 (Régression)": "ML Model 1",
+    "🌳 ML Model 2 (Arbre)": "ML Model 2",
+    "📝 Nouveau Patient": "Nouveau Patient",
+    "📈 Suivi Patient": "Suivi Patient",
+    "🥘 Conseils Nutrition": "Nutrition",
+    "🏥 Centres de Santé": "Centres Santé",
+    "📚 Formation Diabète": "Formation",
+    "🔐 Gestion Utilisateurs": "Gestion Utilisateurs",
+    "⚙️ Configuration & Stats": "Configuration & Stats"
+}
+# ============================================
+# ============================================
+# DÉBUT DE L'APPLICATION PRINCIPALE (Initialement app2.py)
+# ============================================
+
+# Initialiser les variables de session
+init_session_state()
+
+# Si pas connecté, afficher la page de login et arrêter l'exécution
+if not st.session_state.logged_in:
+    show_login_page()
+    st.stop()  # Arrête l'exécution ici
+
+# ============================================
+# CONFIGURATION DE LA PAGE (après login)
 # ============================================
 st.set_page_config(
     page_title="DiabèteCam 🇨🇲",
@@ -53,80 +320,106 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================
-# INITIALISATION BASE DE DONNÉES
-# ============================================
-def init_database():
-    conn = sqlite3.connect('diabetecam.db')
-    c = conn.cursor()
-    
-    # Table Patients
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS patients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nom TEXT NOT NULL,
-            prenom TEXT NOT NULL,
-            date_naissance DATE,
-            sexe TEXT,
-            telephone TEXT,
-            ville TEXT,
-            quartier TEXT,
-            date_inscription TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Table Mesures
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS mesures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patient_id INTEGER,
-            date_mesure TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            pregnancies INTEGER,
-            glucose REAL,
-            blood_pressure INTEGER,
-            skin_thickness REAL,
-            insulin REAL,
-            bmi REAL,
-            diabetes_pedigree REAL,
-            age INTEGER,
-            prediction TEXT,
-            risque_niveau TEXT,
-            FOREIGN KEY (patient_id) REFERENCES patients (id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
 
-# Initialiser la BD au démarrage
-init_database()
+
+
+# Initialiser la BD au démarrage (teste la connexion)
+# init_database() # Décommentez ceci si vous voulez forcer le stop en cas d'erreur DB au login
 
 # ============================================
 # CHARGEMENT DES DONNÉES
 # ============================================
-df = pd.read_csv('diabetes.csv')
-df_temp = df.drop(columns=['Outcome','Pregnancies','Insulin','SkinThickness'])
-df_temp = df_temp.replace(0,np.nan)
-df = pd.concat([df['Pregnancies'],df['Insulin'],df['SkinThickness'],df_temp,df['Outcome']],axis=1)
-df = df.dropna().reset_index(drop=True)
+# Assurez-vous que 'diabetes.csv' est dans le même répertoire
+try:
+    df = pd.read_csv('diabetes.csv')
+    df_temp = df.drop(columns=['Outcome','Pregnancies','Insulin','SkinThickness'])
+    df_temp = df_temp.replace(0,np.nan)
+    df = pd.concat([df['Pregnancies'],df['Insulin'],df['SkinThickness'],df_temp,df['Outcome']],axis=1)
+    df = df.dropna().reset_index(drop=True)
+except FileNotFoundError:
+    st.error("⚠️ Fichier `diabetes.csv` non trouvé. Assurez-vous qu'il est dans le répertoire de l'application.")
+    df = pd.DataFrame() # Créer un DataFrame vide pour éviter les erreurs
+except Exception as e:
+    st.error(f"⚠️ Erreur lors du chargement ou du nettoyage des données: {e}")
+    df = pd.DataFrame()
+
 
 # ============================================
 # SIDEBAR - NAVIGATION
 # ============================================
-st.sidebar.markdown("# 🇨🇲 DiabèteCam")
+
+# Informations utilisateur connecté
+logo_html = """
+    <div style="display: flex; align-items: center; margin-bottom: 15px;">
+        <h1 style="margin: 0;">DiabèteCam</h1>
+    </div>
+    <hr style="margin-top: 0; margin-bottom: 10px;">
+"""
+# Tente de charger le logo.png, si non trouvé, affiche le message sans image.
+try:
+    with open('logo.png', 'rb') as f:
+        logo_base64 = base64.b64encode(f.read()).decode()
+        logo_html = f"""
+            <div style="display: flex; align-items: center; margin-bottom: 15px;">
+                <img src="data:image/png;base64,{logo_base64}" 
+                     width="30px" style="margin-right: 10px;">
+                <h1 style="margin: 0;">DiabèteCam</h1>
+            </div>
+            <hr style="margin-top: 0; margin-bottom: 10px;">
+        """
+except FileNotFoundError:
+    st.warning("Fichier 'logo.png' non trouvé. Affichage du titre seul.")
+except Exception as e:
+    st.warning(f"Erreur de chargement du logo : {e}. Affichage du titre seul.")
+
+
+st.sidebar.markdown(logo_html, unsafe_allow_html=True)
+
+
+# Message de bienvenue
+user = st.session_state.user
+role_emoji = {
+    'medecin': '👨‍⚕️',
+    'infirmier': '👩‍⚕️',
+    'admin': '🔐'
+}
+
+st.sidebar.success(f"""
+**{role_emoji.get(user.get('role', 'admin'), '👤')} Connecté(e) :** {user.get('fullName', 'Inconnu')}  
+*{user.get('role', 'visiteur').capitalize()}*
+""")
+
 st.sidebar.markdown("---")
 
-page = st.sidebar.radio("📍 Navigation", [
+# Menu de navigation (filtré selon les permissions)
+# Menu de navigation (filtré selon les permissions)
+all_pages = [
     "🏠 Accueil",
     "📊 Visualisations",
     "🤖 ML Model 1 (Régression)",
     "🌳 ML Model 2 (Arbre)",
-    "📝 Nouveau Patient",
+    "📝 Nouveau Patient", # Laissez-le ici, le filtre de permission fera le tri
     "📈 Suivi Patient",
     "🥘 Conseils Nutrition",
     "🏥 Centres de Santé",
-    "📚 Formation Diabète"
-])
+    "📚 Formation Diabète",
+    "🔐 Gestion Utilisateurs", # Ajout de l'emoji
+    "⚙️ Configuration & Stats" # Nouveau menu logique pour l'Admin
+]
+# Filtrer les pages selon les permissions
+available_pages = [p for p in all_pages if check_permission(p)]
+
+# S'assurer qu'une page par défaut est sélectionnée s'il y en a
+if available_pages:
+    page = st.sidebar.radio("📍 Navigation", available_pages)
+else:
+    st.sidebar.error("Aucune page disponible. Veuillez vous connecter.")
+    page = "🏠 Accueil" # Page par défaut en cas d'erreur
+
+# Bouton de déconnexion
+st.sidebar.markdown("---")
+if st.sidebar.button("🚪 Se Déconnecter", use_container_width=True, type="primary"):
+    logout()
 
 # URGENCES dans la sidebar
 st.sidebar.markdown("---")
@@ -144,11 +437,12 @@ st.sidebar.error("""
 """)
 
 # ============================================
-# PAGE 1 : ACCUEIL
+# AFFICHAGE DES PAGES
 # ============================================
+
 if page == "🏠 Accueil":
     # En-tête avec drapeau
-    st.markdown("# 🇨🇲 Bienvenue sur DiabèteCam")
+    st.markdown("# Bienvenue sur DiabèteCam")
     st.markdown("### *Votre partenaire santé au Cameroun*")
     
     # Salutations en langues locales
@@ -196,10 +490,13 @@ if page == "🏠 Accueil":
     
     # Aperçu des données
     st.markdown("### 📋 Aperçu de nos données de recherche")
-    st.dataframe(df.head(), use_container_width=True)
-    
-    with st.expander("📊 Statistiques détaillées"):
-        st.dataframe(df.describe(), use_container_width=True)
+    if not df.empty:
+        st.dataframe(df.head(), use_container_width=True)
+        
+        with st.expander("📊 Statistiques détaillées"):
+            st.dataframe(df.describe(), use_container_width=True)
+    else:
+        st.warning("Données non chargées. Veuillez vérifier le fichier `diabetes.csv`.")
     
     with st.expander("ℹ️ À propos de ce dataset"):
         st.write("""
@@ -221,6 +518,14 @@ if page == "🏠 Accueil":
 # PAGE 2 : VISUALISATIONS
 # ============================================
 elif page == "📊 Visualisations":
+    if not check_permission(page):
+        st.error("🔒 Accès refusé : Vous n'avez pas les permissions pour cette page.")
+        st.stop()
+    
+    if df.empty:
+        st.warning("Impossible d'afficher les visualisations. Les données ne sont pas chargées.")
+        st.stop()
+        
     st.title("📊 Explorez les Données Visuellement")
     st.write("Choisissez les graphiques que vous souhaitez voir !")
     
@@ -245,7 +550,7 @@ elif page == "📊 Visualisations":
                 st.markdown("### Relation Glucose - Obésité")
                 fig, ax = plt.subplots(figsize=(10, 6))
                 sns.scatterplot(data=df, x='Glucose', y='BMI', hue='Outcome', 
-                               palette=['#006233', '#CE1126'], ax=ax)
+                                palette=['#006233', '#CE1126'], ax=ax)
                 ax.set_title('Glucose vs BMI selon le diagnostic', fontsize=14)
                 ax.set_xlabel("Glucose (mg/dL)", fontsize=12)
                 ax.set_ylabel("BMI (kg/m²)", fontsize=12)
@@ -258,7 +563,7 @@ elif page == "📊 Visualisations":
             corr = df.corr()
             fig, ax = plt.subplots(figsize=(12, 8))
             sns.heatmap(data=corr, cmap='RdYlGn', annot=True, fmt='.2f', 
-                       linewidths=0.5, ax=ax, center=0)
+                        linewidths=0.5, ax=ax, center=0)
             ax.set_title("Matrice de corrélation", fontsize=16)
             st.pyplot(fig)
             
@@ -298,9 +603,9 @@ elif page == "📊 Visualisations":
                 st.markdown(f"### Distribution : {display_name}")
                 fig, ax = plt.subplots(figsize=(10, 6))
                 sns.kdeplot(data=df[df['Outcome']==1], x=feature, 
-                           label='Diabétiques', fill=True, color='#CE1126', ax=ax)
+                            label='Diabétiques', fill=True, color='#CE1126', ax=ax)
                 sns.kdeplot(data=df[df['Outcome']==0], x=feature, 
-                           label='Non-diabétiques', fill=True, color='#006233', ax=ax)
+                            label='Non-diabétiques', fill=True, color='#006233', ax=ax)
                 ax.set_title(f'Distribution de {display_name}', fontsize=14)
                 ax.legend()
                 st.pyplot(fig)
@@ -309,11 +614,10 @@ elif page == "📊 Visualisations":
 # PAGE 3 : ML MODEL 1 (RÉGRESSION LOGISTIQUE)
 # ============================================
 elif page == "🤖 ML Model 1 (Régression)":
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-    
+    if df.empty:
+        st.warning("Impossible d'entraîner le modèle. Les données ne sont pas chargées.")
+        st.stop()
+        
     st.title("🤖 Modèle 1 : Régression Logistique")
     
     with st.expander("📖 Comment fonctionne ce modèle ?"):
@@ -342,7 +646,7 @@ elif page == "🤖 ML Model 1 (Régression)":
     st.markdown("### 1️⃣ Choisissez les critères médicaux à analyser")
     features = st.multiselect(
         "Sélectionnez au moins un critère :", 
-        df.columns[:-1], 
+        df.columns[:-1].tolist(), # Convertir en liste pour être sûr
         default=["Glucose", "BMI"],
         help="Ces données seront utilisées pour entraîner le modèle"
     )
@@ -372,7 +676,7 @@ elif page == "🤖 ML Model 1 (Régression)":
                 accuracy = accuracy_score(y_test, y_pred)
                 
                 st.success("✅ Modèle entraîné avec succès !")
-                st.balloons()
+                
                 
                 # Résultats
                 col1, col2 = st.columns(2)
@@ -389,8 +693,8 @@ elif page == "🤖 ML Model 1 (Régression)":
                 with col1:
                     fig, ax = plt.subplots(figsize=(6, 5))
                     sns.heatmap(cm, annot=True, fmt='d', cmap='Greens', 
-                               xticklabels=['Non-Diabétique', 'Diabétique'],
-                               yticklabels=['Non-Diabétique', 'Diabétique'], ax=ax)
+                                xticklabels=['Non-Diabétique', 'Diabétique'],
+                                yticklabels=['Non-Diabétique', 'Diabétique'], ax=ax)
                     ax.set_ylabel('Réalité')
                     ax.set_xlabel('Prédiction')
                     ax.set_title('Matrice de Confusion')
@@ -413,7 +717,7 @@ elif page == "🤖 ML Model 1 (Régression)":
                 # Rapport détaillé
                 with st.expander("📋 Voir le rapport détaillé"):
                     st.text(classification_report(y_test, y_pred, 
-                                                 target_names=['Non-Diabétique', 'Diabétique']))
+                                                target_names=['Non-Diabétique', 'Diabétique']))
                     st.markdown("""
                     **Explication des métriques :**
                     - **Precision** : Sur 100 diagnostics "diabétique", combien sont vrais ?
@@ -442,6 +746,9 @@ elif page == "🤖 ML Model 1 (Régression)":
             
             for idx, feature in enumerate(features):
                 with cols[idx % 2]:
+                    # Utiliser .get() pour une gestion plus robuste
+                    default_value = df[feature].mean() if not df.empty and feature in df.columns else 0.0
+                    
                     if feature == "Glucose":
                         feature_dict[feature] = st.number_input(
                             "🍬 Glucose (mg/dL)", 50.0, 300.0, 120.0
@@ -458,9 +765,25 @@ elif page == "🤖 ML Model 1 (Régression)":
                         feature_dict[feature] = st.number_input(
                             "💉 Pression artérielle", 40, 200, 80
                         )
+                    elif feature == "Pregnancies":
+                         feature_dict[feature] = st.number_input(
+                            "🤰 Nombre de grossesses", 0, 15, 1
+                        )
+                    elif feature == "SkinThickness":
+                         feature_dict[feature] = st.number_input(
+                            "📏 Épaisseur de peau", 0.0, 100.0, 25.0
+                        )
+                    elif feature == "Insulin":
+                         feature_dict[feature] = st.number_input(
+                            "💉 Insuline", 0.0, 900.0, 100.0
+                        )
+                    elif feature == "DiabetesPedigreeFunction":
+                         feature_dict[feature] = st.number_input(
+                            "🧬 Hérédité (DPF)", 0.0, 2.5, 0.4
+                        )
                     else:
                         feature_dict[feature] = st.number_input(
-                            f"{feature}", min_value=0.0
+                            f"{feature}", min_value=0.0, value=default_value
                         )
             
             submitted = st.form_submit_button("🔮 Prédire", use_container_width=True)
@@ -496,7 +819,6 @@ elif page == "🤖 ML Model 1 (Régression)":
                     
                     🔄 Refaites le test tous les 6 mois
                     """)
-
 # ============================================
 # PAGE 4 : ML MODEL 2 (ARBRE DE DÉCISION)
 # ============================================
@@ -607,12 +929,14 @@ elif page == "🌳 ML Model 2 (Arbre)":
                 else:
                     st.success("✅ Prédiction : **Pas de Diabète détecté**")
 
-# ============================================
-# PAGE 5 : NOUVEAU PATIENT
+## PAGE 5 : NOUVEAU PATIENT (AVEC MySQL)
 # ============================================
 elif page == "📝 Nouveau Patient":
     st.title("📝 Inscription d'un Nouveau Patient")
     st.info("💡 Enregistrez les informations d'un patient pour suivre son évolution")
+    
+    # Récupérer la date du jour comme valeur par défaut
+    today = date.today()
     
     with st.form("inscription_patient"):
         st.markdown("### 👤 Informations Personnelles")
@@ -621,7 +945,8 @@ elif page == "📝 Nouveau Patient":
         with col1:
             nom = st.text_input("Nom *", placeholder="TCHOUA")
             prenom = st.text_input("Prénom *", placeholder="Marie")
-            date_naissance = st.date_input("Date de naissance *")
+            # Utilisation de today comme valeur par défaut
+            date_naissance = st.date_input("Date de naissance *", value=today) 
             sexe = st.selectbox("Sexe *", ["Homme", "Femme"])
         
         with col2:
@@ -636,233 +961,308 @@ elif page == "📝 Nouveau Patient":
         submitted = st.form_submit_button("💾 Enregistrer", use_container_width=True, type="primary")
         
         if submitted:
+            # Conversion de l'objet date en format YYYY-MM-DD string pour MySQL
+            date_naissance_str = date_naissance.strftime('%Y-%m-%d')
+
             if nom and prenom and telephone:
-                try:
-                    conn = sqlite3.connect('diabetecam.db')
-                    c = conn.cursor()
-                    c.execute('''
-                        INSERT INTO patients (nom, prenom, date_naissance, sexe, telephone, ville, quartier)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (nom, prenom, date_naissance, sexe, telephone, ville, quartier))
-                    conn.commit()
-                    patient_id = c.lastrowid
-                    conn.close()
+                conn = create_db_connection() # Établir la connexion
+                if conn:
+                    cursor = conn.cursor()
+                    try:
+                        # Requête INSERT : Utilisation de %s pour les placeholders dans mysql.connector
+                        insert_query = """
+                            INSERT INTO patients 
+                            (nom, prenom, date_naissance, sexe, telephone, ville, quartier)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """
+                        data = (nom, prenom, date_naissance_str, sexe, telephone, ville, quartier)
+                        
+                        cursor.execute(insert_query, data)
+                        conn.commit() # Confirmer la transaction
+                        
+                        # Récupérer l'ID inséré (équivalent de c.lastrowid en SQLite)
+                        patient_id = cursor.lastrowid
+                        
+                        st.success(f"""
+                        ✅ **Patient enregistré avec succès !**
+                        
+                        📋 **ID Patient :** {patient_id}
+                        👤 **Nom :** {prenom} {nom}
+                        📞 **Contact :** {telephone}
+                        
+                        Vous pouvez maintenant ajouter des mesures dans "📈 Suivi Patient"
+                        """)
                     
-                    st.success(f"""
-                    ✅ **Patient enregistré avec succès !**
+                    except Error as e:
+                        st.error(f"❌ Erreur MySQL lors de l'enregistrement : {e}")
                     
-                    📋 **ID Patient :** {patient_id}
-                    👤 **Nom :** {prenom} {nom}
-                    📞 **Contact :** {telephone}
-                    
-                    Vous pouvez maintenant ajouter des mesures dans "📈 Suivi Patient"
-                    """)
-                except Exception as e:
-                    st.error(f"❌ Erreur lors de l'enregistrement : {e}")
+                    finally:
+                        # Toujours fermer le curseur et la connexion
+                        if cursor:
+                            cursor.close()
+                        close_db_connection(conn)
+                        
+                else:
+                    st.error("❌ Impossible de se connecter à la base de données MySQL.")
             else:
                 st.error("⚠️ Veuillez remplir tous les champs obligatoires (*)")
-
 # ============================================
-# PAGE 6 : SUIVI PATIENT
+# PAGE 6 : SUIVI PATIENT (AVEC MySQL)
 # ============================================
 elif page == "📈 Suivi Patient":
+    # Assurez-vous que les imports nécessaires sont en tête de votre fichier: 
+    # from datetime import datetime, date
+    from datetime import datetime # Nécessaire pour datetime.now()
+    import matplotlib.pyplot as plt # Nécessaire pour les graphiques
+    
     st.title("📈 Suivi Médical des Patients")
     
-    conn = sqlite3.connect('diabetecam.db')
-    patients = pd.read_sql_query("SELECT * FROM patients ORDER BY date_inscription DESC", conn)
+    # 1. Établir la connexion MySQL
+    conn = create_db_connection()
     
-    if len(patients) > 0:
-        # Sélection du patient
-        st.markdown("### 1️⃣ Sélectionner un patient")
-        patient_names = patients['prenom'] + ' ' + patients['nom'] + ' (ID: ' + patients['id'].astype(str) + ')'
-        selected = st.selectbox("Choisir un patient :", patient_names)
-        
-        if selected:
-            patient_id = int(selected.split('ID: ')[1].split(')')[0])
-            patient_info = patients[patients['id'] == patient_id].iloc[0]
+    if conn:
+        try:
+            # 2. Lire les données directement depuis MySQL dans un DataFrame Pandas
+            query = "SELECT * FROM patients ORDER BY date_inscription DESC"
+            patients = pd.read_sql(query, conn) 
             
-            # Carte du patient
-            st.markdown("---")
-            st.markdown("### 📋 Fiche Patient")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("👤 Nom", f"{patient_info['prenom']} {patient_info['nom']}")
-            with col2:
-                st.metric("📞 Téléphone", patient_info['telephone'])
-            with col3:
-                st.metric("🏙️ Ville", patient_info['ville'])
-            with col4:
-                age = datetime.now().year - pd.to_datetime(patient_info['date_naissance']).year
-                st.metric("🎂 Âge", f"{age} ans")
-            
-            st.markdown("---")
-            
-            # Ajouter une nouvelle mesure
-            st.markdown("### 2️⃣ Ajouter une Nouvelle Mesure")
-            
-            with st.form("nouvelle_mesure"):
-                st.markdown("#### Données Médicales")
+            if len(patients) > 0:
+                # 3. Sélection du patient
+                st.markdown("### 1️⃣ Sélectionner un patient")
                 
-                col1, col2, col3 = st.columns(3)
+                # Assurez-vous que la colonne 'id' est bien un type chaîne pour la concaténation
+                patients['id'] = patients['id'].astype(str)
+                patient_names = patients['prenom'] + ' ' + patients['nom'] + ' (ID: ' + patients['id'] + ')'
                 
-                with col1:
-                    pregnancies = st.number_input("🤰 Grossesses", 0, 20, 0)
-                    glucose = st.number_input("🍬 Glucose (mg/dL)", 50, 300, 100)
-                    blood_pressure = st.number_input("💉 Pression artérielle", 40, 200, 80)
+                default_index = 0
+                selected = st.selectbox("Choisir un patient :", patient_names, index=default_index)
                 
-                with col2:
-                    skin_thickness = st.number_input("📏 Épaisseur peau (mm)", 0, 100, 20)
-                    insulin = st.number_input("💉 Insuline (µU/mL)", 0, 900, 0)
-                    bmi = st.number_input("⚖️ BMI", 10.0, 70.0, 25.0, step=0.1)
-                
-                with col3:
-                    diabetes_pedigree = st.number_input("🧬 Pedigree Diabète", 0.0, 3.0, 0.5, step=0.01)
-                    patient_age = st.number_input("🎂 Âge actuel", 18, 100, age)
-                
-                submitted = st.form_submit_button("💾 Enregistrer la mesure", use_container_width=True, type="primary")
-                
-                if submitted:
-                    # Faire une prédiction si le modèle existe
-                    prediction = "Non analysé"
-                    risque_niveau = "À évaluer"
+                if selected:
+                    # Extraction de l'ID du patient sélectionné
+                    patient_id_str = selected.split('ID: ')[1].split(')')[0]
+                    patient_id_int = int(patient_id_str)
                     
-                    if 'model' in st.session_state:
-                        try:
-                            features = st.session_state['features']
-                            scaler = st.session_state['scaler']
-                            model = st.session_state['model']
-                            
-                            # Créer un dictionnaire avec toutes les features
-                            data_dict = {
-                                'Pregnancies': pregnancies,
-                                'Glucose': glucose,
-                                'BloodPressure': blood_pressure,
-                                'SkinThickness': skin_thickness,
-                                'Insulin': insulin,
-                                'BMI': bmi,
-                                'DiabetesPedigreeFunction': diabetes_pedigree,
-                                'Age': patient_age
-                            }
-                            
-                            # Ne garder que les features utilisées par le modèle
-                            input_data = {k: v for k, v in data_dict.items() if k in features}
-                            input_df = pd.DataFrame([input_data])
-                            
-                            pred = model.predict(scaler.transform(input_df))
-                            proba = model.predict_proba(scaler.transform(input_df))
-                            
-                            prediction = "Diabétique" if pred[0] == 1 else "Non-Diabétique"
-                            
-                            if proba[0][1] >= 0.7:
-                                risque_niveau = "Élevé"
-                            elif proba[0][1] >= 0.4:
-                                risque_niveau = "Modéré"
-                            else:
-                                risque_niveau = "Faible"
-                        except:
-                            prediction = "Erreur de prédiction"
-                            risque_niveau = "Erreur"
+                    # Récupération des informations du patient sélectionné
+                    patient_info = patients[patients['id'].astype(int) == patient_id_int].iloc[0]
+                    current_patient_id = patient_id_int 
                     
-                    # Enregistrer dans la BD
-                    try:
-                        c = conn.cursor()
-                        c.execute('''
-                            INSERT INTO mesures 
-                            (patient_id, pregnancies, glucose, blood_pressure, skin_thickness, 
-                             insulin, bmi, diabetes_pedigree, age, prediction, risque_niveau)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (patient_id, pregnancies, glucose, blood_pressure, skin_thickness, 
-                              insulin, bmi, diabetes_pedigree, patient_age, prediction, risque_niveau))
-                        conn.commit()
-                        
-                        st.success("✅ Mesure enregistrée avec succès !")
-                        
-                        # Afficher le résultat de la prédiction
-                        if prediction == "Diabétique":
-                            st.error(f"⚠️ **Prédiction : {prediction}** - Risque {risque_niveau}")
-                        elif prediction == "Non-Diabétique":
-                            st.success(f"✅ **Prédiction : {prediction}** - Risque {risque_niveau}")
-                        else:
-                            st.info(f"ℹ️ {prediction}")
-                            
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Erreur : {e}")
-            
-            # Historique des mesures
-            st.markdown("---")
-            st.markdown("### 3️⃣ Historique des Mesures")
-            
-            mesures = pd.read_sql_query(
-                f"SELECT * FROM mesures WHERE patient_id = {patient_id} ORDER BY date_mesure DESC", 
-                conn
-            )
-            
-            if len(mesures) > 0:
-                st.dataframe(mesures, use_container_width=True)
-                
-                # Graphiques d'évolution
-                st.markdown("### 📊 Évolution dans le temps")
-                
-                tab1, tab2, tab3 = st.tabs(["🍬 Glucose", "⚖️ BMI", "💉 Pression"])
-                
-                with tab1:
-                    if len(mesures) > 1:
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.plot(mesures['date_mesure'], mesures['glucose'], 
-                               marker='o', color='#CE1126', linewidth=2)
-                        ax.axhline(y=126, color='red', linestyle='--', label='Seuil Diabète')
-                        ax.axhline(y=100, color='orange', linestyle='--', label='Seuil Pré-diabète')
-                        ax.set_xlabel('Date')
-                        ax.set_ylabel('Glucose (mg/dL)')
-                        ax.set_title('Évolution du Glucose')
-                        ax.legend()
-                        plt.xticks(rotation=45)
-                        st.pyplot(fig)
-                    else:
-                        st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
-                
-                with tab2:
-                    if len(mesures) > 1:
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.plot(mesures['date_mesure'], mesures['bmi'], 
-                               marker='s', color='#006233', linewidth=2)
-                        ax.axhline(y=25, color='orange', linestyle='--', label='Surpoids')
-                        ax.axhline(y=30, color='red', linestyle='--', label='Obésité')
-                        ax.set_xlabel('Date')
-                        ax.set_ylabel('BMI (kg/m²)')
-                        ax.set_title('Évolution du BMI')
-                        ax.legend()
-                        plt.xticks(rotation=45)
-                        st.pyplot(fig)
-                    else:
-                        st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
-                
-                with tab3:
-                    if len(mesures) > 1:
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.plot(mesures['date_mesure'], mesures['blood_pressure'], 
-                               marker='^', color='#FCD116', linewidth=2)
-                        ax.axhline(y=140, color='red', linestyle='--', label='Hypertension')
-                        ax.set_xlabel('Date')
-                        ax.set_ylabel('Pression artérielle')
-                        ax.set_title('Évolution de la Pression')
-                        ax.legend()
-                        plt.xticks(rotation=45)
-                        st.pyplot(fig)
-                    else:
-                        st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
-                
-            else:
-                st.info("ℹ️ Aucune mesure enregistrée pour ce patient")
-    
-    else:
-        st.warning("⚠️ Aucun patient enregistré.")
-        st.info("👉 Allez dans **'📝 Nouveau Patient'** pour inscrire votre premier patient !")
-    
-    conn.close()
+                    # ==========================================
+                    # 4. AFFICHER LA FICHE PATIENT 
+                    # ==========================================
+                    st.subheader(f"Dossier pour {patient_info['prenom']} {patient_info['nom']}")
+                    st.write(f"Ville: **{patient_info['ville']}** | Téléphone: **{patient_info['telephone']}**")
 
+                    st.markdown("---")
+                    st.markdown("### 📋 Fiche Patient")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    # Calcul de l'âge
+                    try:
+                        age = datetime.now().year - pd.to_datetime(patient_info['date_naissance']).year
+                    except:
+                        # Cas d'erreur si date_naissance est manquante/invalide
+                        age = 0 
+                    
+                    # CORRECTION CLÉ : Assurer que l'âge par défaut est >= 18
+                    default_input_age = max(18, age)
+
+                    with col1:
+                        st.metric("👤 Nom", f"{patient_info['prenom']} {patient_info['nom']}")
+                    with col2:
+                        st.metric("📞 Téléphone", patient_info['telephone'])
+                    with col3:
+                        st.metric("🏙️ Ville", patient_info['ville'])
+                    with col4:
+                        st.metric("🎂 Âge", f"{age} ans")
+                    
+                    st.markdown("---")
+                    
+                    # ==========================================
+                    # 5. AJOUTER UNE NOUVELLE MESURE
+                    # ==========================================
+                    st.markdown("### 2️⃣ Ajouter une Nouvelle Mesure")
+                    
+                    with st.form("nouvelle_mesure"):
+                        st.markdown("#### Données Médicales")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            pregnancies = st.number_input("🤰 Grossesses", 0, 20, 0, key="m_preg")
+                            glucose = st.number_input("🍬 Glucose (mg/dL)", 50, 300, 100, key="m_gluc")
+                            blood_pressure = st.number_input("💉 Pression artérielle", 40, 200, 80, key="m_bp")
+                        
+                        with col2:
+                            skin_thickness = st.number_input("📏 Épaisseur peau (mm)", 0, 100, 20, key="m_st")
+                            insulin = st.number_input("💉 Insuline (µU/mL)", 0, 900, 0, key="m_insu")
+                            bmi = st.number_input("⚖️ BMI", 10.0, 70.0, 25.0, step=0.1, key="m_bmi")
+                        
+                        with col3:
+                            diabetes_pedigree = st.number_input("🧬 Pedigree Diabète", 0.0, 3.0, 0.5, step=0.01, key="m_dpf")
+                            # Utilisation de la variable default_input_age pour respecter le min_value=18
+                            patient_age = st.number_input("🎂 Âge actuel", 18, 100, default_input_age, key="m_age") 
+                            
+                        # Le bouton soumis est correctement placé ici
+                        submitted = st.form_submit_button("💾 Enregistrer la mesure", use_container_width=True, type="primary")
+                        
+                        if submitted:
+                            # 5.1 Logique de Prédiction
+                            prediction = "Non analysé"
+                            risque_niveau = "À évaluer"
+                            probabilite_diabete = 0.0 # Initialisation de la variable
+                            
+                            if 'model' in st.session_state and 'scaler' in st.session_state and 'features' in st.session_state:
+                                try:
+                                    features = st.session_state['features']
+                                    scaler = st.session_state['scaler']
+                                    model = st.session_state['model']
+                                    
+                                    data_dict = {
+                                        'Pregnancies': pregnancies, 'Glucose': glucose, 'BloodPressure': blood_pressure,
+                                        'SkinThickness': skin_thickness, 'Insulin': insulin, 'BMI': bmi,
+                                        'DiabetesPedigreeFunction': diabetes_pedigree, 'Age': patient_age
+                                    }
+                                    
+                                    input_data = {k: v for k, v in data_dict.items() if k in features}
+                                    input_df = pd.DataFrame([input_data])
+                                    
+                                    pred = model.predict(scaler.transform(input_df))
+                                    proba = model.predict_proba(scaler.transform(input_df))
+                                    
+                                    prediction = "Diabétique" if pred[0] == 1 else "Non-Diabétique"
+                                    
+                                    # CALCUL ET STOCKAGE DE LA PROBABILITÉ
+                                    probabilite_diabete = proba[0][1] * 100 
+
+                                    if proba[0][1] >= 0.7:
+                                        risque_niveau = "Élevé"
+                                    elif proba[0][1] >= 0.4:
+                                        risque_niveau = "Modéré"
+                                    else:
+                                        risque_niveau = "Faible"
+                                        
+                                except Exception as err:
+                                    prediction = "Erreur de prédiction"
+                                    risque_niveau = "Erreur"
+                                    st.warning(f"Impossible de prédire : {err}")
+                            
+                            # 5.2 Enregistrer dans la BD (avec %s pour MySQL)
+                            if conn:
+                                try:
+                                    cursor = conn.cursor()
+                                    sql = '''
+                                        INSERT INTO mesures 
+                                        (patient_id, pregnancies, glucose, blood_pressure, skin_thickness, 
+                                         insulin, bmi, diabetes_pedigree, age, prediction, risque_niveau)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    '''
+                                    values = (current_patient_id, pregnancies, glucose, blood_pressure, skin_thickness, 
+                                              insulin, bmi, diabetes_pedigree, patient_age, prediction, risque_niveau)
+                                    
+                                    cursor.execute(sql, values)
+                                    conn.commit()
+                                    
+                                    st.success("✅ Mesure enregistrée avec succès !")
+                                    
+                                    # AFFICHAGE DU RÉSULTAT CORRIGÉ
+                                    message_proba = f" (Probabilité : **{probabilite_diabete:.2f}%**)" if probabilite_diabete > 0 else ""
+
+                                    if prediction == "Diabétique":
+                                        st.error(f"⚠️ **Prédiction : {prediction}** - Risque {risque_niveau}{message_proba}")
+                                    elif prediction == "Non-Diabétique":
+                                        st.success(f"✅ **Prédiction : {prediction}** - Risque {risque_niveau}{message_proba}")
+                                    else:
+                                        st.info(f"ℹ️ {prediction}{message_proba}")
+                                        
+                                    st.rerun() 
+                                except Error as e:
+                                    st.error(f"❌ Erreur MySQL lors de l'enregistrement de la mesure : {e}")
+                            else:
+                                st.error("❌ Connexion MySQL perdue. Impossible d'enregistrer.")
+                                
+                    # ==========================================
+                    # 6. HISTORIQUE DES MESURES
+                    # ==========================================
+                    st.markdown("---")
+                    st.markdown("### 3️⃣ Historique des Mesures")
+                    
+                    mesures = pd.read_sql_query(
+                        f"SELECT * FROM mesures WHERE patient_id = {current_patient_id} ORDER BY date_mesure DESC", 
+                        conn
+                    )
+                    
+                    if len(mesures) > 0:
+                        st.dataframe(mesures, use_container_width=True)
+                        
+                        # Graphiques d'évolution
+                        st.markdown("### 📊 Évolution dans le temps")
+                        
+                        tab1, tab2, tab3 = st.tabs(["🍬 Glucose", "⚖️ BMI", "💉 Pression"])
+                        
+                        with tab1:
+                            if len(mesures) > 1:
+                                fig, ax = plt.subplots(figsize=(10, 5))
+                                ax.plot(mesures['date_mesure'], mesures['glucose'], 
+                                        marker='o', color='#CE1126', linewidth=2)
+                                ax.axhline(y=126, color='red', linestyle='--', label='Seuil Diabète')
+                                ax.axhline(y=100, color='orange', linestyle='--', label='Seuil Pré-diabète')
+                                ax.set_xlabel('Date')
+                                ax.set_ylabel('Glucose (mg/dL)')
+                                ax.set_title('Évolution du Glucose')
+                                ax.legend()
+                                plt.xticks(rotation=45)
+                                st.pyplot(fig)
+                            else:
+                                st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
+                        
+                        with tab2:
+                            if len(mesures) > 1:
+                                fig, ax = plt.subplots(figsize=(10, 5))
+                                ax.plot(mesures['date_mesure'], mesures['bmi'], 
+                                        marker='s', color='#006233', linewidth=2)
+                                ax.axhline(y=25, color='orange', linestyle='--', label='Surpoids')
+                                ax.axhline(y=30, color='red', linestyle='--', label='Obésité')
+                                ax.set_xlabel('Date')
+                                ax.set_ylabel('BMI (kg/m²)')
+                                ax.set_title('Évolution du BMI')
+                                ax.legend()
+                                plt.xticks(rotation=45)
+                                st.pyplot(fig)
+                            else:
+                                st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
+                        
+                        with tab3:
+                            if len(mesures) > 1:
+                                fig, ax = plt.subplots(figsize=(10, 5))
+                                ax.plot(mesures['date_mesure'], mesures['blood_pressure'], 
+                                        marker='^', color='#FCD116', linewidth=2)
+                                ax.axhline(y=140, color='red', linestyle='--', label='Hypertension')
+                                ax.set_xlabel('Date')
+                                ax.set_ylabel('Pression artérielle')
+                                ax.set_title('Évolution de la Pression')
+                                ax.legend()
+                                plt.xticks(rotation=45)
+                                st.pyplot(fig)
+                            else:
+                                st.info("📊 Besoin d'au moins 2 mesures pour afficher l'évolution")
+                    
+                    else:
+                        st.info("ℹ️ Aucune mesure enregistrée pour ce patient")
+                        
+                else:
+                    st.info("Aucun patient sélectionné.")
+            
+            else:
+                 st.info("Aucun patient n'est actuellement enregistré dans la base de données.")
+            
+        except Exception as e:
+            st.error(f"Erreur lors de l'opération MySQL : {e}")
+            
+        finally:
+            # 7. Fermer la connexion
+            close_db_connection(conn)
+    else:
+        st.error("Impossible d'établir la connexion à la base de données pour le suivi patient.")
 # ============================================
 # PAGE 7 : CONSEILS NUTRITION
 # ============================================
@@ -1408,13 +1808,123 @@ elif page == "📚 Formation Diabète":
     """)
 
 # ============================================
+# PAGE 9 : GESTION UTILISATEURS (CORRIGÉ)
+# ============================================
+
+elif page == "🔐 Gestion Utilisateurs":
+    # 1. Vérification des permissions
+    # ... (le code d'accès refusé reste le même) ...
+    
+    st.title("🔐 Gestion des Comptes Utilisateurs")
+    st.info("Interface pour créer de nouveaux comptes pour les équipes médicales et administratives.")
+    
+    # --- Formulaire de Création d'utilisateur (Logique de soumission incluse) ---
+    with st.form("creation_utilisateur", clear_on_submit=True):
+        st.markdown("### Créer un Nouveau Compte")
+        
+        col_u1, col_u2 = st.columns(2)
+        
+        # Définition des champs d'entrée
+        with col_u1:
+            # st.selectbox doit être au début pour que new_role soit défini avant les conditions
+            new_role = st.selectbox("Rôle du nouvel utilisateur *", ["medecin", "infirmier", "admin"])
+            new_username = st.text_input("Nom d'utilisateur (Login) *", placeholder="Ex: dr.nouvelle")
+        
+        with col_u2:
+            new_fullname = st.text_input("Nom Complet *", placeholder="Ex: Dr. Alain NGANOU")
+            new_password = st.text_input("Mot de passe temporaire *", type="password")
+            
+        st.markdown("---")
+
+        # Définir les permissions par défaut basées sur le rôle pour le multiselect (CORRECTION ICI)
+        # On utilise le nom de permission simple
+        if new_role == 'medecin':
+            simple_perms = ['Accueil', 'Visualisations', 'ML Model 1', 'ML Model 2', 'Nouveau Patient', 'Suivi Patient', 'Nutrition', 'Centres Santé', 'Formation']
+        elif new_role == 'infirmier':
+            simple_perms = ['Accueil', 'Nouveau Patient', 'Suivi Patient', 'Nutrition', 'Centres Santé', 'Formation']
+        elif new_role == 'admin':
+            simple_perms = ['Accueil', 'Visualisations', 'ML Model 1', 'ML Model 2', 'Nouveau Patient', 'Suivi Patient', 'Nutrition', 'Centres Santé', 'Formation', 'Gestion Utilisateurs', 'Configuration & Stats']
+
+        # CONVERSION: Mapper les noms de permission simple aux clés avec emojis
+        default_perms = [get_page_key(p) for p in simple_perms]
+
+        # Permettre la personnalisation des permissions
+        selected_permissions = st.multiselect(
+            "Personnaliser les Permissions (optionnel)",
+            options=list(page_mapping.keys()),
+            default=default_perms # C'EST MAINTENANT UNE LISTE DE CLÉS AVEC EMOJIS
+        )
+
+        submitted_user = st.form_submit_button("➕ Créer l'utilisateur", type="primary", use_container_width=True)
+        
+        # Logique de soumission (s'exécute lorsque le bouton est cliqué)
+        if submitted_user:
+            if new_username and new_fullname and new_password:
+                # IMPORTANT : Reconvertir les permissions sélectionnées (avec emojis) 
+                # en leur nom simple pour l'enregistrement en BD
+                perms_to_save = [page_mapping[key] for key in selected_permissions]
+
+                # Appel à la fonction d'insertion en BD
+                if create_user_in_db(new_username, new_password, new_role, new_fullname, perms_to_save):
+                    st.success(f"✅ Utilisateur **{new_fullname} ({new_username})** créé et enregistré en base de données.")
+                else:
+                    st.error("❌ Échec de la création de l'utilisateur. Le nom d'utilisateur existe peut-être déjà ou il y a une erreur MySQL.")
+            else:
+                st.error("❌ Veuillez remplir tous les champs obligatoires.")
+                
+    st.markdown("---")
+    
+    # Ajout d'une section pour visualiser les utilisateurs (recommandé pour un admin)
+    st.subheader("Visualisation et Modification (À Implémenter)")
+    st.warning("Ajoutez ici le code pour lister tous les utilisateurs de la table `utilisateurs` et permettre leur modification/suppression.")
+# ============================================
+# PAGE 10 : CONFIGURATION & STATS
+# ============================================
+elif page == "⚙️ Configuration & Stats":
+    if not check_permission(page):
+        st.error("🔒 Accès refusé : Vous n'avez pas les permissions pour cette page.")
+        st.stop()
+        
+    st.title("⚙️ Configuration Système & Statistiques Administratives")
+    
+    st.markdown("---")
+    
+    # Statistiques d'utilisation (Placeholder)
+    st.header("📈 Statistiques Générales")
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        st.metric("Total Utilisateurs", "3", "Admin + 2 Pros")
+    with col_s2:
+        st.metric("Patients Enregistrés", "1245", "+ 50 ce mois-ci")
+    with col_s3:
+        st.metric("Modèles Entraînés", "2 (LogReg, Arbre)")
+
+    st.markdown("---")
+    
+    # Configuration (Placeholder)
+    st.header("🛠️ Paramètres du Système")
+    with st.expander("Paramètres de Sécurité"):
+        st.checkbox("Activer l'authentification à deux facteurs pour les Admins", value=True)
+        st.number_input("Nombre de tentatives de connexion maximales", min_value=1, max_value=10, value=5)
+        
+    with st.expander("Paramètres des Modèles ML"):
+        new_test_size = st.slider("Taille de l'ensemble de test par défaut (%)", 10, 50, 20)
+        if st.button("Sauvegarder les Paramètres ML"):
+             st.success(f"Paramètre 'Taille de test' mis à jour à {new_test_size}%")
+             
+    with st.expander("Maintenance de la Base de Données"):
+        if st.button("Faire une Sauvegarde (Backup)"):
+            st.warning("Opération non implémentée, mais serait ici.")
+        if st.button("Nettoyer les logs de connexion"):
+            st.info("Logs nettoyés.")
+# ============================================
 # FOOTER
 # ============================================
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>🇨🇲 <strong>DiabèteCam</strong> - Application de surveillance du diabète au Cameroun</p>
-    <p>💚 Fait avec amour pour la santé des Camerounais | Version 1.0</p>
-    <p>⚠️ Cette application est un outil d'aide. Consultez toujours un professionnel de santé.</p>
+    <p><strong>DiabèteCam</strong> - Application de surveillance Médicale du diabète au Cameroun</p>
+    
+  
 </div>
 """, unsafe_allow_html=True)
